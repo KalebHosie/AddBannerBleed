@@ -19,6 +19,7 @@ class Program
     ///   -t=36
     ///   -b=36
     ///   -g=12
+    ///   -gSides=top,bottom
     /// Returns a dictionary: { "i": "Input.pdf", "o": "Output.pdf", ... }
     /// </summary>
     static Dictionary<string, string> ParseSwitches(string[] args)
@@ -26,10 +27,10 @@ class Program
         Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var arg in args)
         {
-            // We expect something like "-i=Input.pdf" or "-l=72"
-            // 1) Trim leading "-". 
-            // 2) Split on '='
-            // 3) Key is what's before "=", value is what's after.
+            // We expect something like "-i=Input.pdf" or "-l=72" or "-gSides=top,bottom"
+            // 1) Trim leading "-"
+            // 2) Split on "="
+            // 3) Key = what's before "=", Value = what's after.
             string trimmed = arg.TrimStart('-');      // e.g. "i=Input.pdf"
             int eqIndex = trimmed.IndexOf('=');
             if (eqIndex > 0)
@@ -61,34 +62,41 @@ class Program
         float current = offset;
         float maxPos = totalDistance - offset;
 
-        // step by 'spacing' until we exceed 'maxPos'
+        // Step by 'spacing' until we exceed 'maxPos'
         while (current <= maxPos + 0.0001f) // small epsilon for float rounding
         {
             positions.Add(current);
             current += spacing;
         }
+
+        // Ensure last grommet is exactly at the right edge if missing
+        if (positions.Count > 0)
+        {
+            float lastPos = positions[positions.Count - 1];
+            if (lastPos < maxPos - spacing / 2)  // Only add if needed
+            {
+                positions.Add(maxPos);
+            }
+        }
+
         return positions;
     }
+
 
     /// <summary>
     /// 2) DrawGrommetCross
     /// Draws a small cross at (centerX, centerY). Cross size is ~1/8" physically if userUnit=1,
-    /// then scaled by userUnit. 
-    /// 
-    /// Note: If you want a 9-point cross at userUnit=1, you do "9 * userUnit".
-    /// If userUnit=1 => 9 points (1/8").
-    /// 
-    /// Adjust or invert if you prefer a different interpretation.
+    /// then scaled by userUnit.
     /// </summary>
     static void DrawGrommetCross(PdfCanvas canvas, float cx, float cy, float userUnit)
     {
         // 9 points at userUnit=1 => 1/8" in standard PDF space
-        float size = 9f * userUnit;
+        float size = 9f / userUnit;
         float half = size / 2f;
 
         // White under-stroke (thick)
         canvas.SaveState();
-        canvas.SetLineWidth(2f * userUnit);
+        canvas.SetLineWidth(2f / userUnit);
         canvas.SetStrokeColor(ColorConstants.WHITE);
         canvas.MoveTo(cx - half, cy);
         canvas.LineTo(cx + half, cy);
@@ -100,7 +108,7 @@ class Program
 
         // Black top stroke (thin)
         canvas.SaveState();
-        canvas.SetLineWidth(1f * userUnit);
+        canvas.SetLineWidth(1f / userUnit);
         canvas.SetStrokeColor(ColorConstants.BLACK);
         canvas.MoveTo(cx - half, cy);
         canvas.LineTo(cx + half, cy);
@@ -120,15 +128,16 @@ class Program
         Dictionary<string, string> switches = ParseSwitches(args);
 
         // required: i (input), o (output), l (left), r (right), t (top), b (bottom)
-        // optional: g (grommet in inches)
+        // optional: g (grommetsInInches), gSides (e.g. "top,bottom")
         if (!switches.ContainsKey("i") || !switches.ContainsKey("o") ||
             !switches.ContainsKey("l") || !switches.ContainsKey("r") ||
             !switches.ContainsKey("t") || !switches.ContainsKey("b"))
         {
             Console.WriteLine("Usage: dotnet run -- -i=INPUT.pdf -o=OUTPUT.pdf " +
                               "-l=<leftBleedPts> -r=<rightBleedPts> -t=<topBleedPts> -b=<bottomBleedPts> " +
-                              "[-g=<grommetsInInches>]");
-            Console.WriteLine("Example: dotnet run -- -i=Input.pdf -o=Output.pdf -l=72 -r=72 -t=36 -b=36 -g=12");
+                              "[-g=<grommetsInInches>] " +
+                              "[-gSides=top,bottom,left,right,all,etc]");
+            Console.WriteLine("Example: dotnet run -- -i=Input.pdf -o=Output.pdf -l=72 -r=72 -t=36 -b=36 -g=12 -gSides=top,bottom");
             return;
         }
 
@@ -160,11 +169,22 @@ class Program
             }
         }
 
+        // optional grommet sides: default = "all"
+        // user can pass e.g. -gSides=top,bottom
+        string grommetSides = "all";
+        if (switches.ContainsKey("gSides"))
+        {
+            grommetSides = switches["gSides"].Trim();
+        }
+        // parse the sides into booleans
+        (bool gTop, bool gBottom, bool gLeft, bool gRight) = ParseGrommetSides(grommetSides);
+
         Console.WriteLine("=== PDF Bleed Mirroring ===");
         Console.WriteLine($"Input: {inputPath}");
         Console.WriteLine($"Output: {outputPath}");
         Console.WriteLine($"Bleeds (pts): Left={bleedLeft}, Right={bleedRight}, Top={bleedTop}, Bottom={bleedBottom}");
         Console.WriteLine($"Grommet spacing (inches): {((grommetInches > 0) ? grommetInches.ToString() : "none")}");
+        Console.WriteLine($"Grommet sides: {grommetSides}");
 
         try
         {
@@ -184,10 +204,9 @@ class Program
                 float userUnit = (userUnitNum != null) ? userUnitNum.FloatValue() : 1.0f;
 
                 // 1) bleeds remain as typed (raw PDF points)
-                // 2) for grommets, convert inches => points * userUnit
-                float ptsPerInch = 72f * userUnit;
+                // 2) for grommets, convert inches => points / userUnit
+                float ptsPerInch = 72f / userUnit;
                 float grommetSpacingPts = (grommetInches > 0) ? (grommetInches * ptsPerInch) : -1f;
-                // e.g. -g=12 => 12 * 72 * userUnit = 864 * userUnit
                 float grommetOffsetPts = 0.5f * ptsPerInch; // offset 0.5" inwards
 
                 // final box
@@ -219,7 +238,16 @@ class Program
                 // Draw grommets if requested
                 if (grommetSpacingPts > 0)
                 {
-                    DrawGrommets(canvas, finalBox, bleedLeft, bleedBottom, grommetSpacingPts, grommetOffsetPts, userUnit);
+                    DrawGrommets(
+                        canvas,
+                        finalBox,
+                        bleedLeft,
+                        bleedBottom,
+                        grommetSpacingPts,
+                        grommetOffsetPts,
+                        userUnit,
+                        gTop, gBottom, gLeft, gRight
+                    );
                 }
             }
 
@@ -229,6 +257,49 @@ class Program
         {
             Console.WriteLine($"❌ Error: {ex}");
         }
+    }
+
+    /// <summary>
+    /// Parse a comma-delimited string (e.g. "top,bottom" or "all")
+    /// and return booleans (top, bottom, left, right).
+    /// </summary>
+    static (bool gTop, bool gBottom, bool gLeft, bool gRight) ParseGrommetSides(string sides)
+    {
+        // default to false
+        bool top = false, bottom = false, left = false, right = false;
+
+        if (string.Equals(sides, "all", StringComparison.OrdinalIgnoreCase))
+        {
+            return (true, true, true, true);
+        }
+
+        // split on comma
+        string[] tokens = sides.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var token in tokens)
+        {
+            string t = token.Trim().ToLowerInvariant();
+            switch (t)
+            {
+                case "t":
+                case "top":
+                    top = true;
+                    break;
+                case "b":
+                case "bottom":
+                    bottom = true;
+                    break;
+                case "l":
+                case "left":
+                    left = true;
+                    break;
+                case "r":
+                case "right":
+                    right = true;
+                    break;
+            }
+        }
+
+        return (top, bottom, left, right);
     }
 
     /// <summary>
@@ -316,9 +387,9 @@ class Program
         float bleedLeft, float bleedRight, float bleedTop, float bleedBottom,
         float userUnit)
     {
-        // Let's do 20 pt base * userUnit => physically consistent
-        float markLength = 20f * userUnit;
-        float lineWidth = 0.5f * userUnit;
+        // Let's do 20 pt base / userUnit => physically consistent
+        float markLength = 20f / userUnit;
+        float lineWidth = 0.5f / userUnit;
 
         canvas.SetLineWidth(lineWidth);
         canvas.SetStrokeColor(ColorConstants.BLACK);
@@ -368,13 +439,17 @@ class Program
     /// <summary>
     /// 6) DrawGrommets 
     /// Uses stepping so it's truly every N inches until we run out of space.
+    /// Explicitly ensures corner grommets are placed if missing.
     /// </summary>
     static void DrawGrommets(
         PdfCanvas canvas,
         Rectangle finalBox,
-        float bleedLeft, float bleedBottom,
-        float spacingPts, float offsetPts,
-        float userUnit)
+        float bleedLeft,
+        float bleedBottom,
+        float spacingPts,
+        float offsetPts,
+        float userUnit,
+        bool gTop, bool gBottom, bool gLeft, bool gRight)
     {
         float width = finalBox.GetWidth();
         float height = finalBox.GetHeight();
@@ -384,40 +459,47 @@ class Program
         // compute Y positions
         List<float> yPositions = CalculateGrommetPositions_Stepped(height, spacingPts, offsetPts);
 
-        // top/bottom edges
-        foreach (float x in xPositions)
+        // ---- TOP/BOTTOM GROMMETS ----
+        if (gTop)
         {
-            // top
-            DrawGrommetCross(
-                canvas,
-                bleedLeft + x,
-                bleedBottom + height - offsetPts,
-                userUnit);
-
-            // bottom
-            DrawGrommetCross(
-                canvas,
-                bleedLeft + x,
-                bleedBottom + offsetPts,
-                userUnit);
+            foreach (float x in xPositions)
+            {
+                DrawGrommetCross(canvas, bleedLeft + x, bleedBottom + height - offsetPts, userUnit);
+            }
+        }
+        if (gBottom)
+        {
+            foreach (float x in xPositions)
+            {
+                DrawGrommetCross(canvas, bleedLeft + x, bleedBottom + offsetPts, userUnit);
+            }
         }
 
-        // left/right edges
-        foreach (float y in yPositions)
+        // ---- LEFT/RIGHT GROMMETS ----
+        if (gLeft)
         {
-            // left
-            DrawGrommetCross(
-                canvas,
-                bleedLeft + offsetPts,
-                bleedBottom + y,
-                userUnit);
+            foreach (float y in yPositions)
+            {
+                DrawGrommetCross(canvas, bleedLeft + offsetPts, bleedBottom + y, userUnit);
+            }
+        }
+        if (gRight)
+        {
+            foreach (float y in yPositions)
+            {
+                DrawGrommetCross(canvas, bleedLeft + width - offsetPts, bleedBottom + y, userUnit);
+            }
+        }
 
-            // right
-            DrawGrommetCross(
-                canvas,
-                bleedLeft + width - offsetPts,
-                bleedBottom + y,
-                userUnit);
+        // ---- ENSURE CORNER GROMMETS ----
+        if (gLeft)
+        {
+            DrawGrommetCross(canvas, bleedLeft + offsetPts, bleedBottom + height - offsetPts, userUnit); // Top-left
+        }
+        if (gRight)
+        {
+            DrawGrommetCross(canvas, bleedLeft + width - offsetPts, bleedBottom + height - offsetPts, userUnit); // Top-right
         }
     }
+
 }
